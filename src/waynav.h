@@ -97,6 +97,11 @@ struct command {
 
 struct binding {
     xkb_keysym_t keysym;
+    /* The key that produces keysym on the active keymap, filled in by
+     * config_resolve_keycodes and XKB_KEYCODE_INVALID until then. Matching
+     * is by keycode, so a key name in the config names a physical key
+     * rather than the symbol its modifiers happen to produce. */
+    xkb_keycode_t keycode;
     uint32_t mods; /* bitmask: MOD_SHIFT, MOD_CTRL, etc. */
     struct command commands[MAX_COMMANDS];
     int num_commands;
@@ -129,9 +134,23 @@ struct config {
  * lines are warned and skipped. */
 int config_load(struct config *cfg, const char *path);
 
-/* Return the first binding matching sym+mods, or NULL. */
+/* The lowest keycode that produces sym at any layout and level of
+ * keymap, or XKB_KEYCODE_INVALID if none does. The xkbcommon
+ * equivalent of X11's XKeysymToKeycode, which is how keynav resolves
+ * the key names in its config. */
+xkb_keycode_t config_keycode_for_keysym(struct xkb_keymap *keymap,
+                                        xkb_keysym_t sym);
+
+/* Resolve every binding's keysym against keymap. Call once the keymap
+ * is known and again whenever it changes; bindings whose keysym no key
+ * produces are warned about and left unmatchable. */
+void config_resolve_keycodes(struct config *cfg, struct xkb_keymap *keymap);
+
+/* Return the binding matching keycode+mods, or NULL. A later line wins
+ * over an earlier one on the same key, as keynav's override does. */
 const struct binding *config_find_binding(const struct config *cfg,
-                                          xkb_keysym_t sym, uint32_t mods);
+                                          xkb_keycode_t keycode,
+                                          uint32_t mods);
 
 struct overlay;
 

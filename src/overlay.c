@@ -511,6 +511,14 @@ static void kbd_keymap(void *data, struct wl_keyboard *kbd, uint32_t fmt,
     }
     ov->xkb_state = xkb_state_new(ov->xkb_keymap);
     log_debug("keyboard keymap loaded");
+
+    /* Bindings name keysyms but match on keycodes, so they have to be
+     * resolved against whatever keymap the compositor just handed us --
+     * again if it hands us another one later. The config is only set once
+     * overlay_run starts, which may be after this event; that path resolves
+     * them itself. */
+    if (ov->cfg)
+        config_resolve_keycodes(ov->cfg, ov->xkb_keymap);
 }
 
 static void disarm_repeat(struct overlay *ov) {
@@ -542,12 +550,15 @@ static void handle_key_dispatch(struct overlay *ov, uint32_t key) {
         return;
 
     xkb_keycode_t kc = key + 8;
-    xkb_keysym_t sym = xkb_state_key_get_one_sym(ov->xkb_state, kc);
     uint32_t mods = xkb_mods_to_config(ov);
 
-    log_debug("key: sym=0x%x mods=0x%x", sym, mods);
+    log_debug("key: keycode=%u mods=0x%x", kc, mods);
 
-    const struct binding *b = config_find_binding(ov->cfg, sym, mods);
+    /* Match on the keycode, not on what xkb makes of it: the effective
+     * keysym for shift+h is H, so matching by keysym could never fire a
+     * binding written as "shift+h". Caps Lock is beside the point for the
+     * same reason. */
+    const struct binding *b = config_find_binding(ov->cfg, kc, mods);
     if (!b)
         return;
 
@@ -1088,6 +1099,11 @@ int overlay_run(struct overlay *ov, struct config *cfg,
     ov->cfg = cfg;
     ov->rs = rs;
     ov->running = true;
+
+    /* The keymap usually arrives during overlay_create, before there was a
+     * config to resolve against. */
+    if (ov->xkb_keymap)
+        config_resolve_keycodes(cfg, ov->xkb_keymap);
 
     send_frame(ov);
 

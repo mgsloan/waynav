@@ -87,6 +87,12 @@ on the current pointer position, including before waynav has moved the pointer.
 Use `line-width <number>` to set the overlay grid line width; the default is
 `1.0`.
 
+A key name names a key, not the symbol it produces under the modifiers
+you are holding, so shifted bindings are written the keynav way:
+`shift+h`, `shift+1`. Naming the shifted symbol instead (`shift+H`,
+`shift+exclam`) picks the same key, so the two spellings are the same
+binding and the later line in the file wins.
+
 ## What it does
 
 - parses keynav-style bindings from `~/.config/waynav/waynavrc`
