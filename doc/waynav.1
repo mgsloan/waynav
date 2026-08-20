@@ -120,11 +120,17 @@ as
 .BR semicolon ,
 or
 .BR Return .
-Because keysyms are resolved after modifiers are applied, shifted
-bindings should use the shifted keysym, for example
-.B shift+H
-rather than
-.BR shift+h .
+A key name identifies a key rather than the symbol that key produces
+under the current modifiers, so a shifted binding is written with the
+unshifted name:
+.B shift+h
+and
+.B shift+1
+work as they do in keynav. Naming the shifted symbol instead
+.RB ( shift+H ,
+.BR shift+exclam )
+selects the same key, so the two spellings are one binding, and a
+later line overrides an earlier one on the same key.
 .PP
 Command chains are comma-separated and contain at most eight commands.
 The first command

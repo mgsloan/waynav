@@ -56,11 +56,25 @@ separately as `start_commands` on the config struct, not as a
 normal binding. These run once at startup to set the initial
 grid.
 
-Key names are resolved through xkbcommon's
-`xkb_keysym_from_name`, so the config matches symbolic names
-(like `semicolon` or `Return`), not physical scancodes. Shifted
-bindings must use the shifted keysym — `shift+H` not `shift+h`
-— because xkb resolves the keysym after applying modifiers.
+Key names are resolved through xkbcommon's `xkb_keysym_from_name`,
+so the config is written in symbolic names (like `semicolon` or
+`Return`) rather than scancodes. A name identifies a key, not the
+symbol that key currently produces: `config_resolve_keycodes` turns
+each binding's keysym into the keycode that carries it once the
+keymap is known, and matching compares keycodes. This is keynav's
+model — `XStringToKeysym` then `XKeysymToKeycode` at config load —
+and it is what makes `shift+h` work. Matching on the keysym xkb
+reports instead cannot: with shift held that keysym is `H`, so the
+binding never fires, and Caps Lock breaks the unshifted bindings
+the same way.
+
+Two consequences. Names that share a key are one binding after
+resolution (`period` and `greater`, `8` and `asterisk`), and a
+later line overrides an earlier one on the same key+modifiers, so
+`config_find_binding` returns the last match rather than the first.
+The keymap arrives from the compositor after the config is parsed,
+which is why resolution is a separate pass and runs again on every
+keymap event.
 
 Command keyword dispatch goes through `match_keyword` in
 config.c. It matches a keyword prefix and guards that the next
@@ -105,10 +119,13 @@ Fractional scaling works by rendering at `buffer_size × scale`
 and using `wp_viewport_set_destination` for the logical size.
 
 The event loop polls two file descriptors: the Wayland
-connection and a timerfd for key repeat. Key events go through
-xkbcommon for keysym resolution, then through
-`xkb_mods_to_config()` to translate xkb modifier state into
-the config's `MOD_*` bitmask, then into `config_find_binding()`.
+connection and a timerfd for key repeat. A key event carries the
+keycode straight into `config_find_binding()`; only the modifier
+state goes through xkbcommon, via `xkb_mods_to_config()`, which
+translates it into the config's `MOD_*` bitmask. The keymap event
+is where bindings get resolved to keycodes, and it can arrive
+before `overlay_run` has set the config, so `overlay_run` resolves
+them too.
 
 ### Input dispatch (input.c)
 
