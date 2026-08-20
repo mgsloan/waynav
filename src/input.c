@@ -199,6 +199,18 @@ void execute_commands(struct overlay *ov, struct region_state *rs,
                       const struct command *cmds, int ncmds) {
     bool did_history_back = false;
 
+    /* Before anything in a batch that ends the session, rather than after it.
+     * A click delivered while this overlay holds the keyboard reaches a client
+     * that has not been offered the selection -- "click 2,end" is middle click
+     * paste, and it pastes nothing. Ending is what makes handing the keyboard
+     * back safe: there is nothing left to type into it. */
+    for (int i = 0; i < ncmds; i++) {
+        if (cmds[i].type == CMD_END) {
+            overlay_release_keyboard(ov);
+            break;
+        }
+    }
+
     for (int i = 0; i < ncmds; i++) {
         if (execute_one(ov, rs, &cmds[i]))
             did_history_back = true;

@@ -66,6 +66,11 @@ struct output {
     struct output *next;
 };
 
+/* A rectangle in the compositor's logical layout space. */
+struct layout_rect {
+    int x, y, w, h;
+};
+
 static int create_shm_file(size_t size) {
     char name[] = "/tmp/waynav-shm-XXXXXX";
     int fd = mkostemp(name, O_CLOEXEC);
@@ -182,6 +187,7 @@ struct overlay {
     int cursor_x;
     int cursor_y;
     bool cursor_position_known;
+    bool keyboard_released;
 
     /* Keyboard / xkb */
     struct xkb_context *xkb_ctx;
@@ -229,7 +235,9 @@ static uint32_t negotiated_version(uint32_t advertised_version,
 }
 
 static const char *output_name_or_unknown(const struct output *output) {
-    return output->name ? output->name : "<unknown>";
+    if (!output || !output->name)
+        return "<unknown>";
+    return output->name;
 }
 
 static void set_output_name(struct output *output, const char *name) {
@@ -366,7 +374,7 @@ static void registry_global(void *data, struct wl_registry *registry,
                       zwlr_virtual_pointer_manager_v1_interface.name) == 0) {
         ov->vptr_mgr = wl_registry_bind(
             registry, name, &zwlr_virtual_pointer_manager_v1_interface,
-            negotiated_version(version, 2));
+            negotiated_version(version, 1));
     } else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0) {
         ov->xdg_out_mgr =
             wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface,
@@ -831,11 +839,6 @@ static bool required_globals_available(const struct overlay *ov) {
         log_err("missing zwlr_virtual_pointer_manager_v1");
         return false;
     }
-    if (zwlr_virtual_pointer_manager_v1_get_version(ov->vptr_mgr) <
-        ZWLR_VIRTUAL_POINTER_MANAGER_V1_CREATE_VIRTUAL_POINTER_WITH_OUTPUT_SINCE_VERSION) {
-        log_err("zwlr_virtual_pointer_manager_v1 version 2 is required");
-        return false;
-    }
     if (!ov->seat) {
         log_err("missing wl_seat");
         return false;
@@ -843,6 +846,11 @@ static bool required_globals_available(const struct overlay *ov) {
     if (!ov->outputs) {
         log_err("missing wl_output");
         return false;
+    }
+    if (!ov->xdg_out_mgr) {
+        /* Without logical geometry there is no layout to place the overlay
+         * in, so warps can only assume its output is the whole of it. */
+        log_warn("missing zxdg_output_manager_v1: warps assume one output");
     }
     return true;
 }
@@ -930,9 +938,17 @@ struct overlay *overlay_create(void) {
     if (!create_overlay_surface(ov))
         goto fail;
 
-    ov->vptr =
-        zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
-            ov->vptr_mgr, ov->seat, ov->selected_output->wl_output);
+    /* No output is suggested: the suggestion is only a hint -- river drops it,
+     * sway honours it -- and warps are sent in layout coordinates, which is
+     * the space an unmapped pointer is read in either way. Suggesting an
+     * output would make those coordinates wrong wherever the hint is taken. */
+    ov->vptr = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
+        ov->vptr_mgr, ov->seat);
+
+    /* Live from here rather than from overlay_run, so that an "end" among the
+     * start commands -- "click 2,end", which wants the click and nothing else
+     * -- still reads as stopped once the loop is reached. */
+    ov->running = true;
 
     log_info("overlay created: %ux%u on %s", ov->surf_width, ov->surf_height,
              output_name_or_unknown(ov->selected_output));
@@ -1049,6 +1065,26 @@ int overlay_get_height(const struct overlay *ov) {
     return 0;
 }
 
+/* Dispatch until wl_pointer.enter lands, or the budget runs out. Returns <0
+ * on a display error, matching wl_display_roundtrip. */
+static int pump_until_cursor_known(struct overlay *ov, int timeout_ms) {
+    struct pollfd pfd = {.fd = wl_display_get_fd(ov->display),
+                         .events = POLLIN};
+    int waited = 0;
+
+    for (;;) {
+        if (wl_display_roundtrip(ov->display) < 0)
+            return -1;
+        if (ov->cursor_position_known || waited >= timeout_ms)
+            return 0;
+
+        int step = 5;
+        if (poll(&pfd, 1, step) < 0 && errno != EINTR)
+            return -1;
+        waited += step;
+    }
+}
+
 bool overlay_get_cursor_position(struct overlay *ov, int *x, int *y) {
     if (!ov || !x || !y)
         return false;
@@ -1059,6 +1095,17 @@ bool overlay_get_cursor_position(struct overlay *ov, int *x, int *y) {
         wl_surface_set_input_region(ov->surface, NULL);
         wl_surface_commit(ov->surface);
         int capture_result = wl_display_roundtrip(ov->display);
+
+        /* Widening the region is not by itself an event the compositor
+         * recomputes pointer focus on -- that happens when the pointer
+         * moves -- so enter goes unsent and the position stays unknown. A
+         * zero-length relative motion is a move that moves nothing. */
+        if (capture_result >= 0 && !ov->cursor_position_known && ov->vptr) {
+            zwlr_virtual_pointer_v1_motion(ov->vptr, 0, wl_fixed_from_int(0),
+                                           wl_fixed_from_int(0));
+            zwlr_virtual_pointer_v1_frame(ov->vptr);
+            capture_result = pump_until_cursor_known(ov, 100);
+        }
 
         wl_surface_set_input_region(ov->surface, ov->input_region);
         wl_surface_commit(ov->surface);
@@ -1081,13 +1128,32 @@ void overlay_stop(struct overlay *ov) {
         ov->running = false;
 }
 
+void overlay_release_keyboard(struct overlay *ov) {
+    if (!ov || !ov->layer_surface || ov->keyboard_released)
+        return;
+
+    log_debug("releasing the keyboard grab");
+
+    zwlr_layer_surface_v1_set_keyboard_interactivity(ov->layer_surface, false);
+    wl_surface_commit(ov->surface);
+    /* The roundtrip is the point: it is what makes the focus change, and the
+     * selection offer that follows it, reach the client before whatever this
+     * was called ahead of. */
+    wl_display_roundtrip(ov->display);
+    ov->keyboard_released = true;
+}
+
 int overlay_run(struct overlay *ov, struct config *cfg,
                 struct region_state *rs) {
     if (!ov)
         return -1;
     ov->cfg = cfg;
     ov->rs = rs;
-    ov->running = true;
+
+    /* A config whose start commands already ran "end" wants no interactive
+     * phase at all: nothing is drawn and no keyboard is waited on. */
+    if (!ov->running)
+        return 0;
 
     send_frame(ov);
 
@@ -1133,17 +1199,92 @@ int overlay_run(struct overlay *ov, struct config *cfg,
     return 0;
 }
 
+/* The union of every output's logical geometry. */
+static void layout_box(const struct overlay *ov, struct layout_rect *box) {
+    bool found = false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+
+    for (const struct output *o = ov->outputs; o; o = o->next) {
+        /* Geometry arrives on xdg-output; without that protocol, or before
+         * its events land, an output contributes nothing to the union. */
+        if (o->width <= 0 || o->height <= 0)
+            continue;
+        if (!found) {
+            x0 = o->x;
+            y0 = o->y;
+            x1 = o->x + o->width;
+            y1 = o->y + o->height;
+            found = true;
+            continue;
+        }
+        if (o->x < x0)
+            x0 = o->x;
+        if (o->y < y0)
+            y0 = o->y;
+        if (o->x + o->width > x1)
+            x1 = o->x + o->width;
+        if (o->y + o->height > y1)
+            y1 = o->y + o->height;
+    }
+
+    if (!found) {
+        /* No logical geometry to place the overlay in: treat its own surface
+         * as the whole layout, which is what a single-output setup is. */
+        box->x = 0;
+        box->y = 0;
+        box->w = overlay_get_width(ov);
+        box->h = overlay_get_height(ov);
+        return;
+    }
+
+    box->x = x0;
+    box->y = y0;
+    box->w = x1 - x0;
+    box->h = y1 - y0;
+}
+
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
+    return v;
+}
+
 void vptr_warp(struct overlay *ov, int x, int y) {
     if (!ov || !ov->vptr)
         return;
 
-    uint32_t ow = (uint32_t)overlay_get_width(ov);
-    uint32_t oh = (uint32_t)overlay_get_height(ov);
+    /* motion_absolute is expressed in the coordinate space the compositor
+     * maps the virtual pointer to, and that is the whole output layout: a
+     * suggested output is only a hint, and river ignores it outright. So the
+     * overlay-local point is lifted into layout space and the extent is the
+     * layout's. Sending output-local coordinates instead stretches every
+     * warp across the layout -- on two side-by-side outputs it doubles x --
+     * and makes the overlay on a secondary output warp onto the primary. */
+    struct layout_rect lb;
+    layout_box(ov, &lb);
+    if (lb.w <= 0 || lb.h <= 0) {
+        log_warn("vptr warp: no layout geometry to warp within");
+        return;
+    }
 
-    log_debug("vptr warp: %d,%d in %ux%u", x, y, ow, oh);
+    int lx = x;
+    int ly = y;
+    if (ov->selected_output && ov->selected_output->width > 0 &&
+        ov->selected_output->height > 0) {
+        lx += ov->selected_output->x;
+        ly += ov->selected_output->y;
+    }
+    lx = clamp_int(lx - lb.x, 0, lb.w);
+    ly = clamp_int(ly - lb.y, 0, lb.h);
 
-    zwlr_virtual_pointer_v1_motion_absolute(ov->vptr, 0, (uint32_t)x,
-                                            (uint32_t)y, ow, oh);
+    log_debug("vptr warp: %d,%d on %s -> %d,%d in %dx%d layout", x, y,
+              output_name_or_unknown(ov->selected_output), lx, ly, lb.w, lb.h);
+
+    zwlr_virtual_pointer_v1_motion_absolute(ov->vptr, 0, (uint32_t)lx,
+                                            (uint32_t)ly, (uint32_t)lb.w,
+                                            (uint32_t)lb.h);
     zwlr_virtual_pointer_v1_frame(ov->vptr);
     ov->cursor_x = x;
     ov->cursor_y = y;
