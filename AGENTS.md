@@ -84,6 +84,14 @@ Overlay layer with exclusive keyboard interactivity. Its input
 region is set to empty (0×0) so mouse events pass through to
 windows underneath — only the keyboard is captured.
 
+That grab is only as dismissable as the keyboard holding it. If the
+seat loses its keyboard capability — the last keyboard unplugged —
+no binding can fire, `end` included, and nothing outside the process
+can be waited for, so `seat_caps` stops the loop rather than holding
+the grab. This does not cover unplugging one keyboard of several: the
+capability only drops with the last one, and until then the overlay is
+still dismissable from the keyboards that remain.
+
 The layer-shell output is intentionally left unset so the compositor
 chooses it from the current focus policy. Treat `wl_surface.enter` as
 the source of truth and bind the virtual pointer to that same output;

@@ -650,6 +650,15 @@ static void seat_caps(void *data, struct wl_seat *s, uint32_t caps) {
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !ov->keyboard) {
         ov->keyboard = wl_seat_get_keyboard(ov->seat);
         wl_keyboard_add_listener(ov->keyboard, &kbd_listener, ov);
+    } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && ov->keyboard) {
+        /* The seat has lost its last keyboard while this overlay holds an
+         * exclusive grab on it. Every binding is now unreachable, "end"
+         * included, so waiting cannot get the grab released -- only something
+         * outside the process can. Give up instead. */
+        log_warn("the seat lost its keyboard; exiting");
+        wl_keyboard_destroy(ov->keyboard);
+        ov->keyboard = NULL;
+        ov->running = false;
     }
     if ((caps & WL_SEAT_CAPABILITY_POINTER) && !ov->pointer) {
         ov->pointer = wl_seat_get_pointer(ov->seat);
