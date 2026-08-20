@@ -1059,6 +1059,26 @@ int overlay_get_height(const struct overlay *ov) {
     return 0;
 }
 
+/* Dispatch until wl_pointer.enter lands, or the budget runs out. Returns <0
+ * on a display error, matching wl_display_roundtrip. */
+static int pump_until_cursor_known(struct overlay *ov, int timeout_ms) {
+    struct pollfd pfd = {.fd = wl_display_get_fd(ov->display),
+                         .events = POLLIN};
+    int waited = 0;
+
+    for (;;) {
+        if (wl_display_roundtrip(ov->display) < 0)
+            return -1;
+        if (ov->cursor_position_known || waited >= timeout_ms)
+            return 0;
+
+        int step = 5;
+        if (poll(&pfd, 1, step) < 0 && errno != EINTR)
+            return -1;
+        waited += step;
+    }
+}
+
 bool overlay_get_cursor_position(struct overlay *ov, int *x, int *y) {
     if (!ov || !x || !y)
         return false;
@@ -1069,6 +1089,17 @@ bool overlay_get_cursor_position(struct overlay *ov, int *x, int *y) {
         wl_surface_set_input_region(ov->surface, NULL);
         wl_surface_commit(ov->surface);
         int capture_result = wl_display_roundtrip(ov->display);
+
+        /* Widening the region is not by itself an event the compositor
+         * recomputes pointer focus on -- that happens when the pointer
+         * moves -- so enter goes unsent and the position stays unknown. A
+         * zero-length relative motion is a move that moves nothing. */
+        if (capture_result >= 0 && !ov->cursor_position_known && ov->vptr) {
+            zwlr_virtual_pointer_v1_motion(ov->vptr, 0, wl_fixed_from_int(0),
+                                           wl_fixed_from_int(0));
+            zwlr_virtual_pointer_v1_frame(ov->vptr);
+            capture_result = pump_until_cursor_known(ov, 100);
+        }
 
         wl_surface_set_input_region(ov->surface, ov->input_region);
         wl_surface_commit(ov->surface);
