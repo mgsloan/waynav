@@ -86,8 +86,19 @@ windows underneath — only the keyboard is captured.
 
 The layer-shell output is intentionally left unset so the compositor
 chooses it from the current focus policy. Treat `wl_surface.enter` as
-the source of truth and bind the virtual pointer to that same output;
-the overlay and pointer must share one logical coordinate space.
+the source of truth for which output the overlay landed on.
+
+The virtual pointer is created with no output suggestion, and
+`vptr_warp` sends `motion_absolute` in layout coordinates: the
+overlay-local point plus the selected output's logical origin, over
+the union of every output's logical geometry. The suggestion is only
+a hint — sway maps the device to that output, river ignores it — so
+output-local coordinates are right only where the hint is taken,
+while layout coordinates with no suggestion are right everywhere,
+because an unmapped pointer is always read against the whole layout.
+Getting this wrong fails silently: on two side-by-side outputs every
+warp doubles its x, and an overlay on the secondary output warps onto
+the primary.
 
 Rendering uses cairo into double-buffered wl_shm buffers.
 Fractional scaling works by rendering at `buffer_size × scale`

@@ -66,6 +66,11 @@ struct output {
     struct output *next;
 };
 
+/* A rectangle in the compositor's logical layout space. */
+struct layout_rect {
+    int x, y, w, h;
+};
+
 static int create_shm_file(size_t size) {
     char name[] = "/tmp/waynav-shm-XXXXXX";
     int fd = mkostemp(name, O_CLOEXEC);
@@ -229,7 +234,9 @@ static uint32_t negotiated_version(uint32_t advertised_version,
 }
 
 static const char *output_name_or_unknown(const struct output *output) {
-    return output->name ? output->name : "<unknown>";
+    if (!output || !output->name)
+        return "<unknown>";
+    return output->name;
 }
 
 static void set_output_name(struct output *output, const char *name) {
@@ -366,7 +373,7 @@ static void registry_global(void *data, struct wl_registry *registry,
                       zwlr_virtual_pointer_manager_v1_interface.name) == 0) {
         ov->vptr_mgr = wl_registry_bind(
             registry, name, &zwlr_virtual_pointer_manager_v1_interface,
-            negotiated_version(version, 2));
+            negotiated_version(version, 1));
     } else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0) {
         ov->xdg_out_mgr =
             wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface,
@@ -831,11 +838,6 @@ static bool required_globals_available(const struct overlay *ov) {
         log_err("missing zwlr_virtual_pointer_manager_v1");
         return false;
     }
-    if (zwlr_virtual_pointer_manager_v1_get_version(ov->vptr_mgr) <
-        ZWLR_VIRTUAL_POINTER_MANAGER_V1_CREATE_VIRTUAL_POINTER_WITH_OUTPUT_SINCE_VERSION) {
-        log_err("zwlr_virtual_pointer_manager_v1 version 2 is required");
-        return false;
-    }
     if (!ov->seat) {
         log_err("missing wl_seat");
         return false;
@@ -843,6 +845,11 @@ static bool required_globals_available(const struct overlay *ov) {
     if (!ov->outputs) {
         log_err("missing wl_output");
         return false;
+    }
+    if (!ov->xdg_out_mgr) {
+        /* Without logical geometry there is no layout to place the overlay
+         * in, so warps can only assume its output is the whole of it. */
+        log_warn("missing zxdg_output_manager_v1: warps assume one output");
     }
     return true;
 }
@@ -930,9 +937,12 @@ struct overlay *overlay_create(void) {
     if (!create_overlay_surface(ov))
         goto fail;
 
-    ov->vptr =
-        zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
-            ov->vptr_mgr, ov->seat, ov->selected_output->wl_output);
+    /* No output is suggested: the suggestion is only a hint -- river drops it,
+     * sway honours it -- and warps are sent in layout coordinates, which is
+     * the space an unmapped pointer is read in either way. Suggesting an
+     * output would make those coordinates wrong wherever the hint is taken. */
+    ov->vptr = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
+        ov->vptr_mgr, ov->seat);
 
     log_info("overlay created: %ux%u on %s", ov->surf_width, ov->surf_height,
              output_name_or_unknown(ov->selected_output));
@@ -1133,17 +1143,92 @@ int overlay_run(struct overlay *ov, struct config *cfg,
     return 0;
 }
 
+/* The union of every output's logical geometry. */
+static void layout_box(const struct overlay *ov, struct layout_rect *box) {
+    bool found = false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+
+    for (const struct output *o = ov->outputs; o; o = o->next) {
+        /* Geometry arrives on xdg-output; without that protocol, or before
+         * its events land, an output contributes nothing to the union. */
+        if (o->width <= 0 || o->height <= 0)
+            continue;
+        if (!found) {
+            x0 = o->x;
+            y0 = o->y;
+            x1 = o->x + o->width;
+            y1 = o->y + o->height;
+            found = true;
+            continue;
+        }
+        if (o->x < x0)
+            x0 = o->x;
+        if (o->y < y0)
+            y0 = o->y;
+        if (o->x + o->width > x1)
+            x1 = o->x + o->width;
+        if (o->y + o->height > y1)
+            y1 = o->y + o->height;
+    }
+
+    if (!found) {
+        /* No logical geometry to place the overlay in: treat its own surface
+         * as the whole layout, which is what a single-output setup is. */
+        box->x = 0;
+        box->y = 0;
+        box->w = overlay_get_width(ov);
+        box->h = overlay_get_height(ov);
+        return;
+    }
+
+    box->x = x0;
+    box->y = y0;
+    box->w = x1 - x0;
+    box->h = y1 - y0;
+}
+
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
+    return v;
+}
+
 void vptr_warp(struct overlay *ov, int x, int y) {
     if (!ov || !ov->vptr)
         return;
 
-    uint32_t ow = (uint32_t)overlay_get_width(ov);
-    uint32_t oh = (uint32_t)overlay_get_height(ov);
+    /* motion_absolute is expressed in the coordinate space the compositor
+     * maps the virtual pointer to, and that is the whole output layout: a
+     * suggested output is only a hint, and river ignores it outright. So the
+     * overlay-local point is lifted into layout space and the extent is the
+     * layout's. Sending output-local coordinates instead stretches every
+     * warp across the layout -- on two side-by-side outputs it doubles x --
+     * and makes the overlay on a secondary output warp onto the primary. */
+    struct layout_rect lb;
+    layout_box(ov, &lb);
+    if (lb.w <= 0 || lb.h <= 0) {
+        log_warn("vptr warp: no layout geometry to warp within");
+        return;
+    }
 
-    log_debug("vptr warp: %d,%d in %ux%u", x, y, ow, oh);
+    int lx = x;
+    int ly = y;
+    if (ov->selected_output && ov->selected_output->width > 0 &&
+        ov->selected_output->height > 0) {
+        lx += ov->selected_output->x;
+        ly += ov->selected_output->y;
+    }
+    lx = clamp_int(lx - lb.x, 0, lb.w);
+    ly = clamp_int(ly - lb.y, 0, lb.h);
 
-    zwlr_virtual_pointer_v1_motion_absolute(ov->vptr, 0, (uint32_t)x,
-                                            (uint32_t)y, ow, oh);
+    log_debug("vptr warp: %d,%d on %s -> %d,%d in %dx%d layout", x, y,
+              output_name_or_unknown(ov->selected_output), lx, ly, lb.w, lb.h);
+
+    zwlr_virtual_pointer_v1_motion_absolute(ov->vptr, 0, (uint32_t)lx,
+                                            (uint32_t)ly, (uint32_t)lb.w,
+                                            (uint32_t)lb.h);
     zwlr_virtual_pointer_v1_frame(ov->vptr);
     ov->cursor_x = x;
     ov->cursor_y = y;
