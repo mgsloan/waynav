@@ -187,6 +187,7 @@ struct overlay {
     int cursor_x;
     int cursor_y;
     bool cursor_position_known;
+    bool keyboard_released;
 
     /* Keyboard / xkb */
     struct xkb_context *xkb_ctx;
@@ -944,6 +945,11 @@ struct overlay *overlay_create(void) {
     ov->vptr = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
         ov->vptr_mgr, ov->seat);
 
+    /* Live from here rather than from overlay_run, so that an "end" among the
+     * start commands -- "click 2,end", which wants the click and nothing else
+     * -- still reads as stopped once the loop is reached. */
+    ov->running = true;
+
     log_info("overlay created: %ux%u on %s", ov->surf_width, ov->surf_height,
              output_name_or_unknown(ov->selected_output));
     return ov;
@@ -1122,13 +1128,32 @@ void overlay_stop(struct overlay *ov) {
         ov->running = false;
 }
 
+void overlay_release_keyboard(struct overlay *ov) {
+    if (!ov || !ov->layer_surface || ov->keyboard_released)
+        return;
+
+    log_debug("releasing the keyboard grab");
+
+    zwlr_layer_surface_v1_set_keyboard_interactivity(ov->layer_surface, false);
+    wl_surface_commit(ov->surface);
+    /* The roundtrip is the point: it is what makes the focus change, and the
+     * selection offer that follows it, reach the client before whatever this
+     * was called ahead of. */
+    wl_display_roundtrip(ov->display);
+    ov->keyboard_released = true;
+}
+
 int overlay_run(struct overlay *ov, struct config *cfg,
                 struct region_state *rs) {
     if (!ov)
         return -1;
     ov->cfg = cfg;
     ov->rs = rs;
-    ov->running = true;
+
+    /* A config whose start commands already ran "end" wants no interactive
+     * phase at all: nothing is drawn and no keyboard is waited on. */
+    if (!ov->running)
+        return 0;
 
     send_frame(ov);
 
