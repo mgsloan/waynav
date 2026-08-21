@@ -98,6 +98,19 @@ Overlay layer with exclusive keyboard interactivity. Its input
 region is set to empty (0×0) so mouse events pass through to
 windows underneath — only the keyboard is captured.
 
+That grab is only as dismissable as the input reaching it, and from
+inside the process a keyboard that stopped reporting and a user who
+stopped typing look identical -- both are silence. The `idle-timeout`
+directive and the `--idle-timeout` option, off unless one of them asks,
+answer both: the timerfd is rearmed by every `wl_keyboard` event, so
+the bound is on the gap between keypresses, not on how long the overlay
+has been up, and a navigation that takes minutes is never cut short.
+Key repeat deliberately does not rearm it, since those expirations are
+this process talking to itself and a key held down when the keyboard
+stopped reporting would otherwise hold the grab forever. Ending this
+way releases any held drag button and exits 3, so a launcher can tell it
+apart from an ordinary `end`.
+
 That grab is only as dismissable as the keyboard holding it. If the
 seat loses its keyboard capability — the last keyboard unplugged —
 no binding can fire, `end` included, and nothing outside the process
@@ -126,8 +139,9 @@ Rendering uses cairo into double-buffered wl_shm buffers.
 Fractional scaling works by rendering at `buffer_size × scale`
 and using `wp_viewport_set_destination` for the logical size.
 
-The event loop polls two file descriptors: the Wayland
-connection and a timerfd for key repeat. A key event carries the
+The event loop polls up to three file descriptors: the Wayland
+connection, a timerfd for key repeat, and a timerfd for the idle
+timeout. A key event carries the
 keycode straight into `config_find_binding()`; only the modifier
 state goes through xkbcommon, via `xkb_mods_to_config()`, which
 translates it into the config's `MOD_*` bitmask. The keymap event

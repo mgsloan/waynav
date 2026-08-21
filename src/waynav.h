@@ -9,6 +9,11 @@
 
 #define HISTORY_MAX 100
 
+/* What waynav exits with when an idle timeout ended the overlay, rather than
+ * a binding or an error. There is no default timeout: nothing bounds the grab
+ * unless the config or the command line asks for it. */
+#define EXIT_IDLE 3
+
 struct region {
     int x, y, w, h;
     int grid_cols, grid_rows;
@@ -127,6 +132,9 @@ struct config {
     uint32_t grid_color;
     uint32_t region_bg;
     double line_width;
+    /* Seconds without a keyboard event that end the overlay, from the
+     * "idle-timeout" directive. 0, the default, is no timeout at all. */
+    int idle_timeout;
 };
 
 /* Parse a waynavrc file into cfg. Returns 0 on success,
@@ -160,6 +168,11 @@ struct overlay;
 void execute_commands(struct overlay *ov, struct region_state *rs,
                       const struct command *cmds, int ncmds);
 
+/* Release a drag's held button, if one is held. `end` does this before the
+ * overlay exits, and so must any other way of ending: the exit drops the
+ * keyboard grab, but a button left down stays down. */
+void input_stop_drag(struct overlay *ov, struct region_state *rs);
+
 struct overlay *overlay_create(void);
 void overlay_destroy(struct overlay *ov);
 /* Schedule a redraw on the next frame callback. */
@@ -172,7 +185,17 @@ int overlay_get_height(const struct overlay *ov);
 /* Return the pointer position in logical surface coordinates. */
 bool overlay_get_cursor_position(struct overlay *ov, int *x, int *y);
 
-/* Run the event loop. Blocks until CMD_END or error. */
+/* End the overlay after secs without a single keyboard event, rather than
+ * hold an exclusive grab nothing is reaching. Values <= 0 leave it off, which
+ * is what a config and a command line that both say nothing amount to. Call
+ * before overlay_run; the countdown restarts on every keyboard event, so it
+ * bounds the gap between keypresses and not the life of the overlay. */
+void overlay_set_idle_timeout(struct overlay *ov, int secs);
+
+/* Whether overlay_run returned because that timeout was reached. */
+bool overlay_idled(const struct overlay *ov);
+
+/* Run the event loop. Blocks until CMD_END, the idle timeout, or error. */
 int overlay_run(struct overlay *ov, struct config *cfg,
                 struct region_state *rs);
 

@@ -93,6 +93,30 @@ you are holding, so shifted bindings are written the keynav way:
 `shift+exclam`) picks the same key, so the two spellings are the same
 binding and the later line in the file wins.
 
+## Idle timeout
+
+The overlay holds an exclusive keyboard grab, so a waynav that stops
+receiving input takes the session's keyboard with it — a keyboard that
+stops enumerating mid-navigation leaves nothing that can press `end`.
+An idle timeout ends the overlay after a stretch in which the compositor
+delivered no keyboard event, with exit status 3. The countdown restarts
+on every keypress, so it bounds the gap between keys rather than how
+long the overlay has been up; key repeat does not restart it, since
+those expirations come from waynav itself.
+
+There is no timeout unless one is asked for, in the config file:
+
+```text
+idle-timeout 120   # give the keyboard back after two idle minutes
+```
+
+or on the command line, which overrides the directive:
+
+```sh
+waynav --idle-timeout 300   # a longer gap
+waynav --idle-timeout 0     # no timeout, whatever the config says
+```
+
 ## What it does
 
 - parses keynav-style bindings from `~/.config/waynav/waynavrc`
@@ -101,6 +125,8 @@ binding and the later line in the file wins.
 - supports region movement, cuts, cell selection, drag, scroll,
   `cursorzoom`, shell commands, and history undo
 - handles fractional scale and key repeat
+- gives up the keyboard grab when the seat loses its last keyboard, and
+  after an optional idle timeout
 - opens on the compositor-selected active output in multi-output layouts
 
 ## Appearance

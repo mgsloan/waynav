@@ -9,6 +9,7 @@
 #include "waynav.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -301,6 +302,26 @@ static bool try_line_width_directive(const char *line, const char *path,
     return true;
 }
 
+/* If line is "idle-timeout <seconds>", parse it into *out. 0 turns the
+ * timeout off, which is what a config that never mentions it also does. */
+static bool try_idle_timeout_directive(const char *line, const char *path,
+                                       int lineno, int *out) {
+    const char *args = match_keyword(line, "idle-timeout");
+    if (!args || !isspace((unsigned char)*args))
+        return false;
+
+    long parsed = 0;
+    char extra = '\0';
+    if (sscanf(args, " %ld %c", &parsed, &extra) == 1 && parsed >= 0 &&
+        parsed <= INT_MAX) {
+        *out = (int)parsed;
+        log_debug("idle-timeout: %lds", parsed);
+    } else {
+        log_warn("%s:%d: invalid idle-timeout", path, lineno);
+    }
+    return true;
+}
+
 static int parse_line(struct config *cfg, const char *path, int lineno,
                       char *line) {
     char *comment = strchr(line, '#');
@@ -325,6 +346,9 @@ static int parse_line(struct config *cfg, const char *path, int lineno,
         return 0;
 
     if (try_line_width_directive(line, path, lineno, &cfg->line_width))
+        return 0;
+
+    if (try_idle_timeout_directive(line, path, lineno, &cfg->idle_timeout))
         return 0;
 
     char *space = line;

@@ -78,7 +78,7 @@ static region_fn region_dispatch[] = {
     [CMD_MOVE_UP] = region_move_up,     [CMD_MOVE_DOWN] = region_move_down,
 };
 
-static void stop_drag(struct overlay *ov, struct region_state *rs) {
+void input_stop_drag(struct overlay *ov, struct region_state *rs) {
     if (!rs->dragging)
         return;
 
@@ -91,7 +91,7 @@ static void stop_drag(struct overlay *ov, struct region_state *rs) {
 static void exec_drag(struct overlay *ov, struct region_state *rs,
                       const struct command *c) {
     if (rs->dragging) {
-        stop_drag(ov, rs);
+        input_stop_drag(ov, rs);
         return;
     }
     int cx, cy;
@@ -184,7 +184,7 @@ static bool execute_one(struct overlay *ov, struct region_state *rs,
     }
 
     if (c->type == CMD_END) {
-        stop_drag(ov, rs);
+        input_stop_drag(ov, rs);
         log_info("end");
         overlay_stop(ov);
     } else if (c->type == CMD_HISTORY_BACK) {

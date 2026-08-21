@@ -10,6 +10,7 @@
 
 #include <fcntl.h>
 #include <getopt.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/file.h>
@@ -20,12 +21,16 @@ static void print_usage(const char *prog) {
             "Usage: %s [OPTIONS]\n"
             "\n"
             "Options:\n"
-            "  -c, --config PATH   config file "
+            "  -c, --config PATH        config file "
             "(default: ~/.config/waynav/waynavrc)\n"
-            "  -l, --log LEVEL     "
+            "  -l, --log LEVEL          "
             "error, warn, info (default), debug\n"
-            "  -v, --version       print version and exit\n"
-            "  -h, --help          show this help\n",
+            "  -i, --idle-timeout SECS  exit after SECS with no keyboard "
+            "input, 0 for never;\n"
+            "                           overrides the config directive of the "
+            "same name\n"
+            "  -v, --version            print version and exit\n"
+            "  -h, --help               show this help\n",
             prog);
 }
 
@@ -88,17 +93,21 @@ int main(int argc, char **argv) {
 
     const char *config_path = NULL;
     const char *log_level_str = NULL;
+    /* Negative means the command line did not say; the config decides then,
+     * and a config that is also silent leaves the timeout off. */
+    int idle_timeout = -1;
 
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
         {"log", required_argument, 0, 'l'},
+        {"idle-timeout", required_argument, 0, 'i'},
         {"version", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
         {NULL, 0, 0, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:l:vh", long_options, NULL)) !=
+    while ((opt = getopt_long(argc, argv, "c:l:i:vh", long_options, NULL)) !=
            -1) {
         switch (opt) {
         case 'c':
@@ -107,6 +116,16 @@ int main(int argc, char **argv) {
         case 'l':
             log_level_str = optarg;
             break;
+        case 'i': {
+            char *rest = NULL;
+            long secs = strtol(optarg, &rest, 10);
+            if (rest == optarg || *rest != '\0' || secs < 0 || secs > INT_MAX) {
+                fprintf(stderr, "invalid --idle-timeout: %s\n", optarg);
+                return 1;
+            }
+            idle_timeout = (int)secs;
+            break;
+        }
         case 'v':
             print_version();
             return 0;
@@ -146,6 +165,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* An exclusive keyboard grab is only as dismissable as the input reaching
+     * it, and from in here a keyboard that stopped reporting and a user who
+     * stopped typing look the same. Ending on the quiet one costs an overlay
+     * that can be brought straight back; not ending costs the session its
+     * keyboard. Which trade that is worth is the config's call, so waynav
+     * makes it only when asked. */
+    if (idle_timeout < 0)
+        idle_timeout = cfg.idle_timeout;
+    overlay_set_idle_timeout(ov, idle_timeout);
+
     int scr_w = overlay_get_width(ov);
     int scr_h = overlay_get_height(ov);
     log_info("screen: %dx%d", scr_w, scr_h);
@@ -158,8 +187,11 @@ int main(int argc, char **argv) {
     }
 
     int ret = overlay_run(ov, &cfg, &rs);
+    bool idled = overlay_idled(ov);
 
     overlay_destroy(ov);
     log_info("exiting");
-    return ret < 0 ? 1 : 0;
+    if (ret < 0)
+        return 1;
+    return idled ? EXIT_IDLE : 0;
 }

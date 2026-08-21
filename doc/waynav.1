@@ -5,6 +5,7 @@ waynav \- grid-based keyboard mouse navigation for Wayland
 .SY waynav
 .OP \-c path
 .OP \-l level
+.OP \-i seconds
 .OP \-v
 .OP \-h
 .YS
@@ -20,7 +21,8 @@ protocol.
 .PP
 The process exits when a configured binding runs the
 .B end
-command.  There is no daemon, IPC, or saved state between invocations.
+command, when the seat loses its last keyboard, or when a configured
+idle timeout elapses with no keyboard event.  There is no daemon, IPC, or saved state between invocations.
 A lock file prevents multiple instances from running at the same time.
 .PP
 waynav targets wlroots-compatible compositors and relies on
@@ -49,6 +51,20 @@ The default is
 .BR info .
 This option overrides
 .IR WAYNAV_LOG .
+.TP
+\fB\-i\fR \fIseconds\fR, \fB\-\-idle\-timeout\fR \fIseconds\fR
+Exit after
+.I seconds
+in which the compositor delivered no keyboard event, instead of holding
+the exclusive keyboard grab.  The countdown restarts on every keypress,
+so it bounds the gap between keys rather than the life of the overlay,
+and key repeat does not restart it.  An overlay that ends this way exits
+with status 3.  This option overrides the
+.B idle\-timeout
+configuration directive;
+.B 0
+turns the timeout off.  There is no timeout unless one of the two asks
+for it.
 .TP
 .B \-v, \-\-version
 Print the version and exit.
@@ -95,6 +111,20 @@ Fill color of the active region. Default:
 .I pixels
 Grid line thickness in pixels.  The value must be greater than zero.
 Default: 1.
+.TP
+.B idle-timeout
+.I seconds
+End the overlay after
+.I seconds
+in which the compositor delivered no keyboard event, rather than keep
+holding the exclusive keyboard grab.  The countdown restarts on every
+keypress, so it bounds the gap between keys rather than the life of the
+overlay, and key repeat does not restart it.  An overlay that ends this
+way exits with status 3.  Default:
+.B 0
+(no timeout).  The
+.B \-\-idle\-timeout
+option overrides this directive.
 .PP
 Normal bindings have this form:
 .PP
@@ -287,5 +317,9 @@ Normal exit, help or version output, or another instance already running.
 .TP
 .B 1
 Configuration, overlay setup, or runtime error.
+.TP
+.B 3
+The overlay ended because its idle timeout elapsed with no keyboard
+event, rather than because a binding or the seat ended it.
 .SH SEE ALSO
 .BR keynav (1)

@@ -213,6 +213,11 @@ struct overlay {
     int32_t repeat_delay; /* ms before first repeat */
     uint32_t repeat_key;  /* evdev code of held key, 0=none */
 
+    /* Idle timeout */
+    int idle_fd;   /* timerfd, -1 when there is no timeout */
+    int idle_secs; /* how long a gap in keyboard input may be */
+    bool idled;    /* the loop ended because that gap was reached */
+
     /* State pointers (set during overlay_run) */
     struct config *cfg;
     struct region_state *rs;
@@ -553,6 +558,22 @@ static void arm_repeat(struct overlay *ov, uint32_t key) {
     timerfd_settime(ov->repeat_fd, 0, &its, NULL);
 }
 
+/* Restart the idle countdown.
+ *
+ * Every keyboard event the compositor delivers rearms it, so the timeout
+ * measures the gap between keypresses rather than the age of the overlay: a
+ * navigation that takes minutes is never cut short, and one that is getting no
+ * input still ends. Key repeat deliberately does not rearm it -- those
+ * expirations are this process talking to itself, and a key held down when the
+ * keyboard stopped reporting would otherwise hold the grab forever. */
+static void arm_idle(struct overlay *ov) {
+    if (ov->idle_fd < 0)
+        return;
+
+    struct itimerspec its = {.it_value = {ov->idle_secs, 0}};
+    timerfd_settime(ov->idle_fd, 0, &its, NULL);
+}
+
 static void handle_key_dispatch(struct overlay *ov, uint32_t key) {
     if (!ov->xkb_state || !ov->cfg)
         return;
@@ -579,6 +600,8 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
     (void)serial;
     (void)time;
     struct overlay *ov = data;
+
+    arm_idle(ov);
 
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
         if (key == ov->repeat_key)
@@ -934,6 +957,7 @@ struct overlay *overlay_create(void) {
         return NULL;
 
     ov->repeat_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    ov->idle_fd = -1;
     ov->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!ov->xkb_ctx)
         goto fail;
@@ -997,6 +1021,8 @@ void overlay_destroy(struct overlay *ov) {
 
     if (ov->repeat_fd >= 0)
         close(ov->repeat_fd);
+    if (ov->idle_fd >= 0)
+        close(ov->idle_fd);
 
     if (ov->vptr)
         zwlr_virtual_pointer_v1_destroy(ov->vptr);
@@ -1163,6 +1189,27 @@ void overlay_release_keyboard(struct overlay *ov) {
     ov->keyboard_released = true;
 }
 
+void overlay_set_idle_timeout(struct overlay *ov, int secs) {
+    if (!ov || secs <= 0)
+        return;
+
+    if (ov->idle_fd < 0) {
+        ov->idle_fd =
+            timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+        if (ov->idle_fd < 0) {
+            log_warn("no idle timeout: timerfd_create failed: %s",
+                     strerror(errno));
+            return;
+        }
+    }
+
+    ov->idle_secs = secs;
+}
+
+bool overlay_idled(const struct overlay *ov) {
+    return ov && ov->idled;
+}
+
 int overlay_run(struct overlay *ov, struct config *cfg,
                 struct region_state *rs) {
     if (!ov)
@@ -1184,12 +1231,31 @@ int overlay_run(struct overlay *ov, struct config *cfg,
 
     int wl_fd = wl_display_get_fd(ov->display);
 
-    struct pollfd fds[2];
-    fds[0].fd = wl_fd;
-    fds[0].events = POLLIN;
-    fds[1].fd = ov->repeat_fd;
-    fds[1].events = POLLIN;
-    int nfds = ov->repeat_fd >= 0 ? 2 : 1;
+    /* The Wayland connection, plus whichever timers were created: neither
+     * timerfd is guaranteed, so the indices are assigned rather than fixed. */
+    struct pollfd fds[3];
+    int nfds = 0;
+    int repeat_idx = -1;
+    int idle_idx = -1;
+
+    fds[nfds].fd = wl_fd;
+    fds[nfds].events = POLLIN;
+    nfds++;
+
+    if (ov->repeat_fd >= 0) {
+        repeat_idx = nfds;
+        fds[nfds].fd = ov->repeat_fd;
+        fds[nfds].events = POLLIN;
+        nfds++;
+    }
+
+    if (ov->idle_fd >= 0) {
+        idle_idx = nfds;
+        fds[nfds].fd = ov->idle_fd;
+        fds[nfds].events = POLLIN;
+        nfds++;
+        arm_idle(ov);
+    }
 
     while (ov->running) {
         /* Flush outgoing requests before blocking. */
@@ -1212,11 +1278,27 @@ int overlay_run(struct overlay *ov, struct config *cfg,
         }
         wl_display_dispatch_pending(ov->display);
 
-        if (nfds > 1 && (fds[1].revents & POLLIN)) {
+        if (repeat_idx >= 0 && (fds[repeat_idx].revents & POLLIN)) {
             uint64_t expirations;
             if (read(ov->repeat_fd, &expirations, sizeof(expirations)) > 0 &&
                 ov->repeat_key != 0) {
                 handle_key_dispatch(ov, ov->repeat_key);
+            }
+        }
+
+        if (idle_idx >= 0 && (fds[idle_idx].revents & POLLIN)) {
+            uint64_t expirations;
+            if (read(ov->idle_fd, &expirations, sizeof(expirations)) > 0) {
+                /* Nothing has been typed for long enough that the keyboard
+                 * this grab is holding is more plausibly going nowhere than
+                 * being thought about. Release a drag first: the exit lets go
+                 * of the grab, but a button left down stays down. */
+                log_warn("no keyboard input for %ds; exiting rather than "
+                         "holding the grab",
+                         ov->idle_secs);
+                input_stop_drag(ov, ov->rs);
+                ov->idled = true;
+                ov->running = false;
             }
         }
     }

@@ -59,6 +59,7 @@ static void test_basic_parse(void) {
     xkb_keycode_t kc_semicolon =
         config_keycode_for_keysym(keymap, XKB_KEY_semicolon);
     assert(cfg.line_width == GRID_LINE_WIDTH_DEFAULT);
+    assert(cfg.idle_timeout == 0);
 
     /* start binding is stored separately. */
     assert(cfg.num_start_commands == 1);
@@ -131,6 +132,51 @@ static void test_invalid_line_width_keeps_previous_value(void) {
     struct config cfg;
     assert(config_load(&cfg, path) == 0);
     assert(cfg.line_width == 2.5);
+    assert(cfg.num_bindings == 1);
+
+    unlink(path);
+}
+
+static void test_idle_timeout(void) {
+    const char *path = "/tmp/waynav_test_config_idle_timeout";
+    write_tmp_config("clear\n"
+                     "idle-timeout 45\n"
+                     "semicolon end\n",
+                     path);
+
+    struct config cfg;
+    assert(config_load(&cfg, path) == 0);
+    assert(cfg.idle_timeout == 45);
+    assert(cfg.num_bindings == 1);
+
+    /* Explicitly off, which is also what a config that never mentions it
+     * gets: nothing bounds the grab unless something asks. */
+    write_tmp_config("idle-timeout 0\n", path);
+    assert(config_load(&cfg, path) == 0);
+    assert(cfg.idle_timeout == 0);
+
+    write_tmp_config("semicolon end\n", path);
+    assert(config_load(&cfg, path) == 0);
+    assert(cfg.idle_timeout == 0);
+
+    unlink(path);
+}
+
+static void test_invalid_idle_timeout_keeps_previous_value(void) {
+    const char *path = "/tmp/waynav_test_config_invalid_idle_timeout";
+    write_tmp_config("idle-timeout 30\n"
+                     "idle-timeout -1\n"
+                     "idle-timeout 1.5\n"
+                     "idle-timeout 30s\n"
+                     "idle-timeout forever\n"
+                     "idle-timeout 99999999999999999999\n"
+                     "idle-timeout2\n"
+                     "semicolon end\n",
+                     path);
+
+    struct config cfg;
+    assert(config_load(&cfg, path) == 0);
+    assert(cfg.idle_timeout == 30);
     assert(cfg.num_bindings == 1);
 
     unlink(path);
@@ -405,6 +451,8 @@ int main(void) {
     test_basic_parse();
     test_line_width();
     test_invalid_line_width_keeps_previous_value();
+    test_idle_timeout();
+    test_invalid_idle_timeout_keeps_previous_value();
     test_cell_select();
     test_shell_command();
     test_cursorzoom();
