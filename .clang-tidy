@@ -1,3 +1,4 @@
+# Keep misc-include-cleaner disabled: Wayland-generated headers cause false positives.
 Checks: >
   -*,
   bugprone-*,
@@ -14,7 +15,6 @@ Checks: >
   performance-*,
   portability-*,
   readability-function-cognitive-complexity,
-  readability-implicit-bool-conversion,
   readability-redundant-*,
 WarningsAsErrors: 'readability-function-cognitive-complexity'
 HeaderFilterRegex: 'src/.*'

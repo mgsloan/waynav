@@ -21,10 +21,31 @@ waynav:int:assert-waynav-smoke() {
 	tests:assert-re "$log_file" 'loaded [0-9]+ bindings from '
 	tests:assert-re "$log_file" 'overlay created:'
 	tests:assert-re "$log_file" 'keyboard keymap loaded'
-	tests:assert-re "$log_file" 'key: sym=0x3b mods=0x0'
+	waynav:int:assert-waynav-exit-key "$log_file"
 	tests:assert-re "$log_file" 'exec: end'
 	tests:assert-re "$log_file" 'exiting'
 	waynav:int:assert-no-protocol-errors "$log_file"
+}
+
+# @description
+#   Assert that the semicolon exit key was resolved and dispatched.
+#   Bindings match by keycode, and the seat keymap differs per compositor
+#   (wtype uploads a minimal keymap to Sway), so the keycode that the
+#   semicolon binding resolved to is extracted before matching the key
+#   event.
+# @arg $1 string Path to waynav.log.
+# @stdout None.
+# @stderr Harness diagnostics on assertion failure.
+# @exitcode 0 If the exit key was dispatched.
+# @exitcode 88 If a harness assertion fails.
+waynav:int:assert-waynav-exit-key() {
+	local log_file=$1
+	local keycode=''
+
+	tests:assert-re "$log_file" 'resolve: sym=0x3b -> keycode=[0-9]+'
+	keycode=$(sed -n 's/.*resolve: sym=0x3b -> keycode=\([0-9]\+\).*/\1/p' \
+		"$log_file" | tail -n 1)
+	tests:assert-re "$log_file" "key: keycode=$keycode mods=0x0"
 }
 
 # @description Assert that nested niri advertised all protocols waynav needs.

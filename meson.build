@@ -8,7 +8,7 @@ project(
     'werror=true',
   ],
   license: 'MIT',
-  version: '1.2.0',
+  version: '1.5.0',
 )
 
 build_version = get_option('build_version')
@@ -75,5 +75,6 @@ input_test = executable(
   'test_input',
   ['tests/test_input.c', 'src/input.c', 'src/grid.c', 'src/log.c'],
   dependencies: [math],
+  link_args: ['-Wl,--wrap=fork', '-Wl,--wrap=sigaction'],
 )
 test('input', input_test)

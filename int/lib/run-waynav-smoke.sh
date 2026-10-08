@@ -143,7 +143,7 @@ EOF
 	local status=$?
 	local pid=$1
 
-	:cleanup-process waynav "$pid" INT
+	:cleanup-process waynav "$pid"
 	exit "$status"
 }
 
@@ -166,6 +166,29 @@ EOF
 	local pid=$1
 
 	kill -0 "$pid" 2>/dev/null
+}
+
+# Send the semicolon exit key until waynav exits or the timeout elapses.
+# The compositor announces the seat keyboard capability only when wtype's
+# virtual keyboard appears, so early key presses race with waynav binding
+# wl_keyboard; press several times per invocation and retry until one
+# lands.
+:send-exit-key() {
+	local pid=$1
+	local timeout=$2
+	local elapsed=0
+
+	while ((elapsed < timeout)); do
+		if ! :process-running "$pid"; then
+			return 0
+		fi
+
+		wtype ';;;'
+		sleep 1
+		((elapsed += 1))
+	done
+
+	! :process-running "$pid"
 }
 
 :print-file() {
@@ -194,23 +217,6 @@ EOF
 
 		if ! :process-running "$pid"; then
 			return 1
-		fi
-
-		sleep 1
-		((elapsed += 1))
-	done
-
-	return 1
-}
-
-:wait-process-exit() {
-	local pid=$1
-	local timeout=$2
-	local elapsed=0
-
-	while ((elapsed < timeout)); do
-		if ! :process-running "$pid"; then
-			return 0
 		fi
 
 		sleep 1
@@ -257,10 +263,8 @@ EOF
 	fi
 
 	:log 'sending exit key'
-	wtype ';'
-
-	if ! :wait-process-exit "$pid" "$exit_timeout"; then
-		:cleanup-process waynav "$pid" INT
+	if ! :send-exit-key "$pid" "$exit_timeout"; then
+		:cleanup-process waynav "$pid"
 		:print-file 'waynav stdout' "$out_file"
 		:print-file 'waynav log' "$log_file"
 		:error 'waynav did not exit after semicolon'

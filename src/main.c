@@ -8,6 +8,7 @@
 #include "log.h"
 #include "waynav.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
@@ -65,7 +66,7 @@ static const char *find_config_path(void) {
 }
 
 /* Try to acquire an exclusive lock. Returns fd on success,
- * -1 if another instance is running. */
+ * -1 if another instance is running, or -2 on an I/O error. */
 static int acquire_lock(void) {
     static char path[512];
     const char *run = getenv("XDG_RUNTIME_DIR");
@@ -74,23 +75,24 @@ static int acquire_lock(void) {
     snprintf(path, sizeof(path), "%s/waynav.lock", run);
 
     int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0)
-        return -1;
+    if (fd < 0) {
+        log_err("cannot open lock %s", path);
+        return -2;
+    }
 
     if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        int error = errno;
         close(fd);
-        return -1;
+        errno = error;
+        if (errno == EWOULDBLOCK || errno == EAGAIN)
+            return -1;
+        log_err("cannot lock %s", path);
+        return -2;
     }
     return fd;
 }
 
 int main(int argc, char **argv) {
-    int lock_fd = acquire_lock();
-    if (lock_fd < 0) {
-        /* Already running — exit silently. */
-        return 0;
-    }
-
     const char *config_path = NULL;
     const char *log_level_str = NULL;
     /* Negative means the command line did not say; the config decides then,
@@ -120,7 +122,7 @@ int main(int argc, char **argv) {
             char *rest = NULL;
             long secs = strtol(optarg, &rest, 10);
             if (rest == optarg || *rest != '\0' || secs < 0 || secs > INT_MAX) {
-                fprintf(stderr, "invalid --idle-timeout: %s\n", optarg);
+                log_err("invalid --idle-timeout: %s", optarg);
                 return 1;
             }
             idle_timeout = (int)secs;
@@ -137,6 +139,10 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+
+    int lock_fd = acquire_lock();
+    if (lock_fd < 0)
+        return lock_fd == -1 ? 0 : 1;
 
     /* Init logging. CLI flag overrides env var. */
     if (log_level_str)
@@ -182,9 +188,9 @@ int main(int argc, char **argv) {
     struct region_state rs;
     region_init(&rs, scr_w, scr_h);
 
-    if (cfg.num_start_commands > 0) {
-        execute_commands(ov, &rs, cfg.start_commands, cfg.num_start_commands);
-    }
+    if (cfg.num_start_commands > 0)
+        execute_startup_commands(ov, &rs, cfg.start_commands,
+                                 cfg.num_start_commands);
 
     int ret = overlay_run(ov, &cfg, &rs);
     bool idled = overlay_idled(ov);

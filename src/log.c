@@ -6,6 +6,7 @@
  */
 
 #include "log.h"
+#include "string-util.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,13 +20,13 @@ static int use_color = 0;
 void log_init(void) {
     const char *env = getenv("WAYNAV_LOG");
     if (env) {
-        if (strcmp(env, "error") == 0)
+        if (streq(env, "error"))
             log_threshold = LOG_LEVEL_ERROR;
-        else if (strcmp(env, "warn") == 0)
+        else if (streq(env, "warn"))
             log_threshold = LOG_LEVEL_WARN;
-        else if (strcmp(env, "info") == 0)
+        else if (streq(env, "info"))
             log_threshold = LOG_LEVEL_INFO;
-        else if (strcmp(env, "debug") == 0)
+        else if (streq(env, "debug"))
             log_threshold = LOG_LEVEL_DEBUG;
     }
 

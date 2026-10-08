@@ -1,63 +1,17 @@
 #ifndef WAYNAV_H
 #define WAYNAV_H
 
+#include "grid.h"
+
 #include <cairo/cairo.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
-#define HISTORY_MAX 100
-
-/* What waynav exits with when an idle timeout ended the overlay, rather than
- * a binding or an error. There is no default timeout: nothing bounds the grab
- * unless the config or the command line asks for it. */
 #define EXIT_IDLE 3
 
-struct region {
-    int x, y, w, h;
-    int grid_cols, grid_rows;
-};
-
-struct region_state {
-    struct region current;
-    struct region history[HISTORY_MAX];
-    int history_len;
-    bool dragging;
-    int drag_button;
-};
-
-/* Reset to full screen with a 2×2 default grid. */
-void region_init(struct region_state *rs, int scr_w, int scr_h);
-
-/* Push current region onto the history stack. Drops the
- * oldest entry when full. */
-void region_save(struct region_state *rs);
-
-/* Restore the most recent history entry. Returns false if
- * the history stack is empty. */
-bool region_history_back(struct region_state *rs);
-
-/* Set grid subdivision. Values ≤ 0 are ignored. */
-void region_set_grid(struct region_state *rs, int cols, int rows);
-
-/* Select a cell using keynav's column-major numbering:
- * cell 1 is top-left, cells fill top-to-bottom then
- * left-to-right. Out-of-range cells are ignored. */
-void region_cell_select(struct region_state *rs, int cell);
-void region_cut_left(struct region_state *rs);
-void region_cut_right(struct region_state *rs);
-void region_cut_up(struct region_state *rs);
-void region_cut_down(struct region_state *rs);
-void region_move_left(struct region_state *rs);
-void region_move_right(struct region_state *rs);
-void region_move_up(struct region_state *rs);
-void region_move_down(struct region_state *rs);
-void region_cursorzoom(struct region_state *rs, int cursor_x, int cursor_y,
-                       int w, int h);
-
-/* Center coordinates of the current region. */
-void region_center(const struct region_state *rs, int *x, int *y);
+#define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
 #define MAX_COMMANDS 8
 #define MAX_BINDINGS 64
@@ -102,10 +56,6 @@ struct command {
 
 struct binding {
     xkb_keysym_t keysym;
-    /* The key that produces keysym on the active keymap, filled in by
-     * config_resolve_keycodes and XKB_KEYCODE_INVALID until then. Matching
-     * is by keycode, so a key name in the config names a physical key
-     * rather than the symbol its modifiers happen to produce. */
     xkb_keycode_t keycode;
     uint32_t mods; /* bitmask: MOD_SHIFT, MOD_CTRL, etc. */
     struct command commands[MAX_COMMANDS];
@@ -120,6 +70,8 @@ struct binding {
 #define GRID_COLOR_DEFAULT 0x6699ff80u
 #define REGION_BG_DEFAULT 0x00000000u
 #define GRID_LINE_WIDTH_DEFAULT 1.0
+#define CLICK_BUTTON_MAX 5
+#define DRAG_BUTTON_MAX 3
 
 struct config {
     struct binding bindings[MAX_BINDINGS];
@@ -142,36 +94,25 @@ struct config {
  * lines are warned and skipped. */
 int config_load(struct config *cfg, const char *path);
 
-/* The lowest keycode that produces sym at any layout and level of
- * keymap, or XKB_KEYCODE_INVALID if none does. The xkbcommon
- * equivalent of X11's XKeysymToKeycode, which is how keynav resolves
- * the key names in its config. */
 xkb_keycode_t config_keycode_for_keysym(struct xkb_keymap *keymap,
                                         xkb_keysym_t sym);
-
-/* Resolve every binding's keysym against keymap. Call once the keymap
- * is known and again whenever it changes; bindings whose keysym no key
- * produces are warned about and left unmatchable. */
 void config_resolve_keycodes(struct config *cfg, struct xkb_keymap *keymap);
 
-/* Return the binding matching keycode+mods, or NULL. A later line wins
- * over an earlier one on the same key, as keynav's override does. */
 const struct binding *config_find_binding(const struct config *cfg,
-                                          xkb_keycode_t keycode,
-                                          uint32_t mods);
+                                          xkb_keycode_t keycode, uint32_t mods);
 
 struct overlay;
 
 /* Run a command chain: mutate region, warp, click, etc.
- * Saves to history and redraws afterward (skips save if
- * the chain contained history-back). */
+ * Each segment between history-back commands is a history unit. A changed
+ * segment pushes its pre-segment region before the next history-back runs.
+ * Stops at end and redraws. */
 void execute_commands(struct overlay *ov, struct region_state *rs,
                       const struct command *cmds, int ncmds);
 
-/* Release a drag's held button, if one is held. `end` does this before the
- * overlay exits, and so must any other way of ending: the exit drops the
- * keyboard grab, but a button left down stays down. */
-void input_stop_drag(struct overlay *ov, struct region_state *rs);
+/* Run startup commands without adding an interactive history entry. */
+void execute_startup_commands(struct overlay *ov, struct region_state *rs,
+                              const struct command *cmds, int ncmds);
 
 struct overlay *overlay_create(void);
 void overlay_destroy(struct overlay *ov);
@@ -200,6 +141,8 @@ int overlay_run(struct overlay *ov, struct config *cfg,
                 struct region_state *rs);
 
 void overlay_stop(struct overlay *ov);
+/* Release an active drag, if any. */
+void overlay_stop_drag(struct overlay *ov, struct region_state *rs);
 
 /* Give keyboard focus back to whatever is under the pointer, and wait for the
  * compositor to have done it.
